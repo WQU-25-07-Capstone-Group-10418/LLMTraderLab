@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Default tickers for Russell 2000 and S&P 500 indices on Yahoo Finance
 DEFAULT_TICKERS = ["^RUT", "^GSPC"]
 
 
@@ -75,7 +74,6 @@ def cli(
     already downloaded. Use --start-date / --end-date to restrict the fetched period.
     """
 
-    # Collect final ticker list and ensure uniqueness + original order
     tickers_list: List[str] = []
     seen = set()
     for tkr in DEFAULT_TICKERS + list(tickers):
@@ -88,9 +86,7 @@ def cli(
     total = len(tickers_list)
     click.echo(f"Preparing to download {total} tickers to {output_dir.resolve()}")
 
-    # Iterate in batches
     for batch_idx, batch in enumerate(chunked(tickers_list, batch_size), start=1):
-        # Filter out tickers that already have data saved
         pending = [tkr for tkr in batch if not (output_dir / f"{tkr.replace('^', '')}.csv").exists()]
         if not pending:
             click.echo(f"Batch {batch_idx}: all {len(batch)} tickers already downloaded, skipping.")
@@ -113,23 +109,18 @@ def cli(
             click.echo(f"Error downloading batch {batch_idx}: {e}")
             continue
 
-        # Handle different return formats from yfinance
         if data.empty:
             click.echo(f"Warning: no data returned for batch {pending}")
             continue
 
-        # Process the data based on number of tickers
         if len(pending) == 1:
-            # Single ticker - data is a DataFrame
             ticker = pending[0]
             if not data.empty:
                 csv_path = output_dir / f"{ticker.replace('^', '')}.csv"
-                # Ensure the index is properly formatted as date
                 data.index = pd.to_datetime(data.index).date
                 data.to_csv(csv_path)
                 click.echo(f"Saved {ticker} → {csv_path}")
         else:
-            # Multiple tickers - data has MultiIndex columns
             for ticker in pending:
                 try:
                     ticker_data = data[ticker]

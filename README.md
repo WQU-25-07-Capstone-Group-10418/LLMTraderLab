@@ -13,3 +13,5 @@ poetry shell
 ```bash
 python download_indices.py --help
 ```
+
+### Predict
