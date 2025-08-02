@@ -40,7 +40,7 @@ def _extract_first_float(text: str) -> float:
         raise ValueError("No numeric value found in LLM response")
     return float(match.group(0))
 
-def get_predict(index: Index, model: Model, temperature: Temperature, history_range: HistoryRange, predict_date: date) -> float:
+def get_predict(index: Index, model: Model, temperature: Temperature, history_range: HistoryRange, predict_date: date) -> Tuple[float, int, int, int]:
     history: List[float] = get_index_data(index, history_range, predict_date)
     if not history:
         raise ValueError("Historical data is empty; cannot make prediction")
@@ -64,7 +64,7 @@ def get_predict(index: Index, model: Model, temperature: Temperature, history_ra
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
-
+ 
     # Debugging log
     print(messages)
 
@@ -80,7 +80,17 @@ def get_predict(index: Index, model: Model, temperature: Temperature, history_ra
     except (TypeError, KeyError):
         content = str(response)
 
-    return _extract_first_float(content)
+    # Extract token usage information
+    try:
+        usage = response.get("usage", {})
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        total_tokens = usage.get("total_tokens", 0)
+    except (TypeError, KeyError):
+        prompt_tokens = completion_tokens = total_tokens = 0
+
+    prediction = _extract_first_float(content)
+    return prediction, prompt_tokens, completion_tokens, total_tokens
 
 def get_index_data(index: Index, history_range: HistoryRange, predict_date: date) -> list[float]:
     data_dir = Path("data")
@@ -90,7 +100,7 @@ def get_index_data(index: Index, history_range: HistoryRange, predict_date: date
 
     # Skip first row (ticker info) and use second row as header
     df = pd.read_csv(csv_path, skiprows=1, parse_dates=[0], index_col=0).sort_index()
-    
+
     # Convert index to datetime if it's not already
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index)
@@ -162,8 +172,8 @@ def load_existing_predictions() -> pd.DataFrame:
             'predict_date', 'prediction', 'actual_value', 'prev_actual_value'
         ])
 
-def save_prediction_result(index: Index, model: Model, temperature: Temperature,
-                         history_range: HistoryRange, predict_date: date,
+def save_prediction_result(index: Index, model: Model, temperature: Temperature, 
+                         history_range: HistoryRange, predict_date: date, 
                          prediction: float, actual_value: float, prev_actual_value: float):
     """Save a single prediction result to the CSV file."""
     predict_csv_path = Path("data") / "predict.csv"
@@ -187,6 +197,31 @@ def save_prediction_result(index: Index, model: Model, temperature: Temperature,
         df = pd.DataFrame([new_row])
 
     df.to_csv(predict_csv_path, index=False)
+
+def save_token_cost(index: Index, model: Model, temperature: Temperature, 
+                   history_range: HistoryRange, prompt_tokens: int, 
+                   completion_tokens: int, total_tokens: int):
+    """Save token usage information to the CSV file."""
+    token_csv_path = Path("data") / "token_cost.csv"
+    token_csv_path.parent.mkdir(exist_ok=True)
+
+    # Create unique ID
+    unique_id = f"{index.value}-{model.value}-{float(temperature)}-{int(history_range)}"
+
+    new_row = {
+        'id': unique_id,
+        'prompt_tokens': prompt_tokens,
+        'completion_tokens': completion_tokens,
+        'total_tokens': total_tokens
+    }
+
+    if token_csv_path.exists():
+        df = pd.read_csv(token_csv_path)
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    else:
+        df = pd.DataFrame([new_row])
+
+    df.to_csv(token_csv_path, index=False)
 
 def prediction_exists(existing_df: pd.DataFrame, index: Index, model: Model,
                      temperature: Temperature, history_range: HistoryRange,
@@ -247,17 +282,17 @@ def run_all_predictions(predict_date: date):
         try:
             print(f"[{processed}/{total_combinations}] Processing {index.value}-{model.value}-{temperature}-{history_range}")
 
-            # Make prediction
-            prediction = get_predict(index, model, temperature, history_range, predict_date)
-
-            # Get actual value and previous day's actual value
+            prediction, prompt_tokens, completion_tokens, total_tokens = get_predict(index, model, temperature, history_range, predict_date)
             actual_value, prev_actual_value = get_actual_value(index, predict_date)
 
-            # Save result
+            # Save prediction result & token cost
             save_prediction_result(index, model, temperature, history_range,
-                                 predict_date, prediction, actual_value, prev_actual_value)
+                predict_date, prediction, actual_value, prev_actual_value)
+            save_token_cost(index, model, temperature, history_range,
+                prompt_tokens, completion_tokens, total_tokens)
 
             print(f"  Prediction: {prediction:.2f}, Actual: {actual_value:.2f}, Prev: {prev_actual_value:.2f}")
+            print(f"  Tokens - Prompt: {prompt_tokens}, Completion: {completion_tokens}, Total: {total_tokens}")
 
         except Exception as e:
             errors += 1
@@ -270,34 +305,86 @@ def run_all_predictions(predict_date: date):
     print(f"Errors: {errors}")
     print(f"Successfully completed: {processed - skipped - errors}")
 
+def run_batch_predictions(num_dates: int = 50):
+    """
+    Run predictions for multiple dates selected from the RUT.csv dataset.
+
+    Args:
+        num_dates: Number of dates to select for prediction (default: 50)
+    """
+    data_dir = Path("data")
+    csv_path = data_dir / "RUT.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Data file not found: {csv_path}")
+
+    print(f"Loading dates from {csv_path}")
+
+    df = pd.read_csv(csv_path, skiprows=1, parse_dates=[0], index_col=0).sort_index()
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+    available_dates = df.index[30:]  # Skip first 30 rows because we need to input 30 days history data
+    total_available = len(available_dates)
+
+    print(f"Total available dates (after skipping first 30): {total_available}")
+    print(f"Date range: {available_dates[0].date()} to {available_dates[-1].date()}")
+
+    if total_available < num_dates:
+        print(f"Warning: Only {total_available} dates available, using all of them")
+        num_dates = total_available
+
+    # Select evenly spaced dates
+    if num_dates == total_available:
+        selected_indices = list(range(total_available))
+    else:
+        step = total_available / num_dates
+        selected_indices = [int(i * step) for i in range(num_dates)]
+
+    selected_dates = [available_dates[i].date() for i in selected_indices]
+
+    print(f"Selected {len(selected_dates)} dates for prediction:")
+    for i, pred_date in enumerate(selected_dates):
+        print(f"  {i+1:2d}. {pred_date}")
+
+    print(f"\nStarting batch predictions for {len(selected_dates)} dates...")
+    print("=" * 80)
+
+    # Track overall progress
+    total_success = 0
+    total_errors = 0
+
+    # Run predictions for each selected date
+    for i, predict_date in enumerate(selected_dates):
+        print(f"\n[DATE {i+1}/{len(selected_dates)}] Processing {predict_date}")
+        print("-" * 60)
+
+        try:
+            # Run all predictions for this date
+            run_all_predictions(predict_date)
+            total_success += 1
+            print(f"Completed predictions for {predict_date}")
+
+        except Exception as e:
+            total_errors += 1
+            print(f"Error processing {predict_date}: {str(e)}")
+            continue
+
+    # Summary
+    print("\n" + "=" * 80)
+    print("BATCH PREDICTION SUMMARY")
+    print("=" * 80)
+    print(f"Total dates processed: {len(selected_dates)}")
+    print(f"Successful dates: {total_success}")
+    print(f"Failed dates: {total_errors}")
+    print(f"Success rate: {total_success/len(selected_dates)*100:.1f}%")
+
+    if total_success > 0:
+        print(f"\nPrediction data saved to: ./data/predict.csv")
+        print(f"Token cost data saved to: ./data/token_cost.csv")
+        print(f"\nTo evaluate results, run: python evaluation.py")
+
 if __name__ == "__main__":
-    run_all_predictions(date(2024, 12, 17))
+    # Run batch predictions for 50 evenly distributed dates
+    run_batch_predictions(50)
 
-    # print("Testing LLM connectivity...")
-
-    # try:
-    #     gemini_response = completion(
-    #         model="gemini/gemini-2.5-flash",
-    #         messages=[{"role": "user", "content": "write code for saying hi from LiteLLM"}]
-    #     )
-    #     print(f"✅ Gemini: {gemini_response['choices'][0]['message']['content'][:50]}...")
-    # except Exception as e:
-    #     print(f"❌ Gemini error: {e}")
-
-    # try:
-    #     nova_response = completion(
-    #         model="bedrock/us.amazon.nova-lite-v1:0",
-    #         messages=[{ "content": "Hello, how are you?","role": "user"}]
-    #     )
-    #     print(f"✅ Nova: {nova_response['choices'][0]['message']['content'][:50]}...")
-    # except Exception as e:
-    #     print(f"❌ Nova error: {e}")
-
-    # try:
-    #     gpt_response = completion(
-    #         model="gpt-3.5-turbo",
-    #         messages=[{ "content": "Hello, how are you?","role": "user"}]
-    #     )
-    #     print(f"✅ GPT: {gpt_response['choices'][0]['message']['content'][:50]}...")
-    # except Exception as e:
-    #     print(f"❌ GPT error: {e}")
+    # To run predictions for a single date, use:
+    # run_all_predictions(date(2024, 12, 17))

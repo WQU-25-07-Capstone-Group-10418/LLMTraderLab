@@ -12,6 +12,7 @@ yfinance = "^0.2.65"
 click = "^8.2.1"
 dotenv = "^0.9.9"
 litellm = "^1.74.3"
+boto3 = "^1.40.0"
 
 
 [tool.poetry.group.dev.dependencies]
