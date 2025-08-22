@@ -1,9 +1,9 @@
 name: Daily Market Backtest
 
 on:
-  schedule:
+  # schedule: (Stop because had enough data)
     # Run every day at 9:30 AM UTC (after market open)
-    - cron: '30 9 * * 1-5'  # Monday to Friday only
+    # - cron: '30 9 * * 1-5'  # Monday to Friday only
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
